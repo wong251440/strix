@@ -261,6 +261,20 @@ class BrowserTabManager:
         else:
             return result
 
+    def export_session(self, file_path: str) -> dict[str, Any]:
+        """Export current session to file"""
+        with self._lock:
+            if self.browser_instance is None:
+                raise RuntimeError("Browser not launched")
+
+        try:
+            result = self.browser_instance.export_storage_state(file_path)
+            result["message"] = f"Session exported to: {file_path}"
+        except (OSError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to export session: {e}") from e
+        else:
+            return result
+
     def list_tabs(self) -> dict[str, Any]:
         with self._lock:
             if self.browser_instance is None:

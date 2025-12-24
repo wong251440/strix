@@ -29,6 +29,7 @@ BrowserAction = Literal[
     "view_source",
     "close",
     "list_tabs",
+    "export_session",
 ]
 
 
@@ -228,6 +229,12 @@ def browser_action(
             return _handle_utility_actions(
                 manager, action, duration, js_code, file_path, tab_id, clear
             )
+
+        # Session management action
+        if action == "export_session":
+            _validate_file_path(action, file_path)
+            assert file_path is not None
+            return manager.export_session(file_path)
 
         _raise_unknown_action(action)
 

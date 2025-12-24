@@ -104,6 +104,26 @@ class DockerRuntime(AbstractRuntime):
                 self._tool_server_port = tool_server_port
                 self._tool_server_token = tool_server_token
 
+                # Prepare volume mounts
+                volumes = {}
+
+                # Mount session directory if storage state is configured
+                storage_state_path = os.getenv("STRIX_SESSION_FILE")
+                if storage_state_path:
+                    storage_state_path = os.path.abspath(storage_state_path)
+                    session_dir = os.path.dirname(storage_state_path)
+                    volumes[session_dir] = {"bind": session_dir, "mode": "rw"}
+                    logger.info(f"Mounting session directory: {session_dir}")
+
+                environment = {
+                    "PYTHONUNBUFFERED": "1",
+                    "CAIDO_PORT": str(caido_port),
+                    "TOOL_SERVER_PORT": str(tool_server_port),
+                    "TOOL_SERVER_TOKEN": tool_server_token,
+                }
+                if storage_state_path:
+                    environment["STRIX_SESSION_FILE"] = storage_state_path
+
                 container = self.client.containers.run(
                     STRIX_IMAGE,
                     command="sleep infinity",
@@ -116,12 +136,8 @@ class DockerRuntime(AbstractRuntime):
                     },
                     cap_add=["NET_ADMIN", "NET_RAW"],
                     labels={"strix-scan-id": scan_id},
-                    environment={
-                        "PYTHONUNBUFFERED": "1",
-                        "CAIDO_PORT": str(caido_port),
-                        "TOOL_SERVER_PORT": str(tool_server_port),
-                        "TOOL_SERVER_TOKEN": tool_server_token,
-                    },
+                    environment=environment,
+                    volumes=volumes if volumes else None,  # Add volume configuration
                     tty=True,
                 )
 

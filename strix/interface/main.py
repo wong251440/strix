@@ -9,6 +9,8 @@ import logging
 import os
 import shutil
 import sys
+import time
+from subprocess import CalledProcessError, run
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +253,9 @@ Examples:
   # Web application penetration test
   strix --target https://example.com
 
+  # Test with authenticated session (auto login)
+  strix --target https://example.com --session true
+
   # GitHub repository analysis
   strix --target https://github.com/user/repo
   strix --target git@github.com:user/repo.git
@@ -270,6 +275,9 @@ Examples:
 
   # Custom instructions (inline)
   strix --target example.com --instruction "Focus on authentication vulnerabilities"
+
+  # Custom instructions with session (auto login)
+  strix --target https://app.com --session true --instruction "Test admin panel"
 
   # Custom instructions (from file)
   strix --target example.com --instruction-file ./instructions.txt
@@ -310,6 +318,16 @@ Examples:
         help="Path to a file containing detailed custom instructions for the penetration test. "
         "Use this option when you have lengthy or complex instructions saved in a file "
         "(e.g., '--instruction-file ./detailed_instructions.txt').",
+    )
+    parser.add_argument(
+        "--session",
+        type=str,
+        nargs="?",
+        const="true",
+        help="Enable session handling. Use --session true to launch Playwright Chromium "
+        "for an interactive login and auto-import the session before Strix starts. "
+        "Or provide a path to a session JSON file. "
+        "Examples: --session true | --session ./session.json",
     )
 
     parser.add_argument(
@@ -360,6 +378,21 @@ Examples:
         except Exception as e:  # noqa: BLE001
             parser.error(f"Failed to read instruction file '{instruction_path}': {e}")
 
+    if args.session:
+        session_value = args.session.strip().lower()
+        if session_value in {"true", "1", "yes"}:
+            args.session = True
+        elif session_value in {"false", "0", "no"}:
+            args.session = None
+        else:
+            session_path = Path(args.session)
+            if not session_path.exists():
+                parser.error(f"Session file not found: '{args.session}'")
+            if not session_path.is_file():
+                parser.error(f"Session path is not a file: '{args.session}'")
+            # Convert to absolute path
+            args.session = str(session_path.resolve())
+
     args.targets_info = []
     for target in args.target:
         try:
@@ -379,6 +412,67 @@ Examples:
     assign_workspace_subdirs(args.targets_info)
 
     return args
+
+
+def _ensure_playwright_ready(console: Console) -> None:
+    try:
+        import playwright  # noqa: F401
+    except Exception:
+        console.print("[bold yellow]Playwright not found. Installing now...[/]")
+        run([sys.executable, "-m", "pip", "install", "playwright"], check=True)
+
+def _ensure_playwright_chromium(console: Console) -> None:
+    console.print("[bold yellow]Installing Playwright Chromium...[/]")
+    run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+
+
+def _find_session_target_url(args: argparse.Namespace) -> str:
+    for target_info in args.targets_info:
+        if target_info["type"] == "web_application":
+            return target_info["details"]["target_url"]
+    raise RuntimeError(
+        "Session auto-login requires a web target URL. "
+        "Please provide a https:// or http:// target, or pass a session file path with "
+        "--session /path/to/session.json."
+    )
+
+
+def _export_session_via_playwright(target_url: str, output_path: Path, console: Console) -> None:
+    console.print("[bold cyan]Launching Playwright with system Chrome for interactive login...[/]")
+    console.print("Please complete login in the browser window.")
+    console.print("Close the browser window to continue.\n")
+
+    chrome_command = [
+        sys.executable,
+        "-m",
+        "playwright",
+        "codegen",
+        target_url,
+        "--save-storage",
+        str(output_path),
+        "--channel=chrome",
+    ]
+    try:
+        run(chrome_command, check=True)
+        console.print(f"[bold green]Session saved to:[/] {output_path}")
+        return
+    except CalledProcessError:
+        console.print(
+            "[bold yellow]Failed to launch system Chrome. Falling back to Playwright Chromium...[/]"
+        )
+
+    _ensure_playwright_chromium(console)
+    chromium_command = [
+        sys.executable,
+        "-m",
+        "playwright",
+        "codegen",
+        target_url,
+        "--save-storage",
+        str(output_path),
+    ]
+    run(chromium_command, check=True)
+    console.print(f"[bold green]Session saved to:[/] {output_path}")
 
 
 def display_completion_message(args: argparse.Namespace, results_path: Path) -> None:
@@ -500,6 +594,33 @@ def main() -> None:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     args = parse_arguments()
+
+    if args.session is True:
+        if args.non_interactive:
+            console = Console()
+            console.print(
+                "[bold red]Session auto-login is not available in non-interactive mode.[/]"
+            )
+            console.print("Use --session /path/to/session.json instead.")
+            sys.exit(1)
+
+        console = Console()
+        try:
+            _ensure_playwright_ready(console)
+            target_url = _find_session_target_url(args)
+            sessions_dir = Path(".strix") / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            session_path = sessions_dir / f"session_{timestamp}.json"
+            _export_session_via_playwright(target_url, session_path, console)
+            args.session = str(session_path.resolve())
+        except (CalledProcessError, RuntimeError) as e:
+            console.print(f"[bold red]Session setup failed:[/] {e}")
+            sys.exit(1)
+
+    # Set session file environment variable if provided
+    if args.session:
+        os.environ["STRIX_SESSION_FILE"] = args.session
 
     check_docker_installed()
     pull_docker_image()

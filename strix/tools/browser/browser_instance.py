@@ -7,6 +7,8 @@ from typing import Any, cast
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
+from .browser_config import BrowserConfig
+from .storage_state_handler import StorageStateHandler
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,10 @@ MAX_JS_RESULT_LENGTH = 5_000
 
 
 class BrowserInstance:
-    def __init__(self) -> None:
+    def __init__(self, config: BrowserConfig | None = None) -> None:
+        self.config = config or BrowserConfig.from_path()
+        # Note: Don't validate here as the file might not exist yet
+
         self.is_running = True
         self._execution_lock = threading.Lock()
 
@@ -80,6 +85,7 @@ class BrowserInstance:
     async def _launch_browser(self, url: str | None = None) -> dict[str, Any]:
         self.playwright = await async_playwright().start()
 
+        # Launch browser (headless mode)
         self.browser = await self.playwright.chromium.launch(
             headless=True,
             args=[
@@ -91,14 +97,26 @@ class BrowserInstance:
             ],
         )
 
-        self.context = await self.browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent=(
+        context_kwargs: dict[str, Any] = {
+            "viewport": {"width": 1280, "height": 720},
+            "user_agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             ),
-        )
+        }
 
+        if self.config.storage_state_path:
+            logger.info(
+                f"Creating context with storage state: {self.config.storage_state_path}"
+            )
+            storage_state = await StorageStateHandler.load_storage_state(
+                self.config.storage_state_path
+            )
+            context_kwargs["storage_state"] = storage_state
+
+        self.context = await self.browser.new_context(**context_kwargs)
+
+        # Common page setup
         page = await self.context.new_page()
         tab_id = f"tab_{self._next_tab_id}"
         self._next_tab_id += 1
@@ -531,3 +549,16 @@ class BrowserInstance:
 
     def is_alive(self) -> bool:
         return self.is_running and self.browser is not None and self.browser.is_connected()
+
+    async def _export_storage_state(self, file_path: str) -> None:
+        """Export current session to file"""
+        if not self.context:
+            raise RuntimeError("No browser context available")
+
+        await StorageStateHandler.save_storage_state(self.context, file_path)
+
+    def export_storage_state(self, file_path: str) -> dict[str, Any]:
+        """Synchronous wrapper for exporting storage state"""
+        with self._execution_lock:
+            self._run_async(self._export_storage_state(file_path))
+            return {"success": True, "file_path": file_path}
